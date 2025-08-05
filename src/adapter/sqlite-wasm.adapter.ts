@@ -2,15 +2,9 @@
 import type { ISqlitePrepare, IAdapter } from "./base";
 
 export class SqliteWasmAdapter implements IAdapter {
-  private worker = new Worker(`
-        import sqlite from "@sqlite.org/sqlite-wasm"
-        let db = null;
-    
-  `);
+  private worker = new Worker("./sqlite-wasm.worker.js", { type: "module" });
 
-  connect: (path: string) => Promise<void> = async (path: string) => {
-    throw new Error("Method not implemented.");
-  };
+  connect: (path: string) => Promise<void> = async (path: string) => {};
   disconnect: () => Promise<void> = async () => {
     throw new Error("Method not implemented.");
   };
