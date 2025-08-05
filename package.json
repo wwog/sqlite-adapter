@@ -1,0 +1,19 @@
+{
+  "name": "sqlite-adapter",
+  "version": "1.0.0",
+  "main": "index.js",
+  "scripts": {
+    "dev": "jiti ./src/index.ts"
+  },
+  "author": "",
+  "license": "ISC",
+  "description": "",
+  "dependencies": {
+    "@sqlite.org/sqlite-wasm": "^3.50.3-build1",
+    "sqlite3": "^5.1.7"
+  },
+  "devDependencies": {
+    "jiti": "^2.5.1",
+    "@types/node": "24.2.0"
+  }
+}
