@@ -1,9 +1,9 @@
 /* npm:@sqlite.org/sqlite-wasm */
-
 import type { ISqlitePrepare, IAdapter } from "./base";
 
 export class SqliteWasmAdapter implements IAdapter {
   private worker = new Worker(`
+        import sqlite from "@sqlite.org/sqlite-wasm"
         let db = null;
     
   `);
