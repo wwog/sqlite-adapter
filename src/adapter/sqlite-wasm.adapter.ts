@@ -1,11 +1,15 @@
 /* npm:@sqlite.org/sqlite-wasm */
 import type { ISqlitePrepare, IAdapter } from "./base";
-import { Worker } from "worker_threads";
+import { Worker as NodeWorker } from "worker_threads";
+
+const isNode = typeof window === "undefined";
+
+const RWorker = isNode ? NodeWorker : Worker;
 
 export class SqliteWasmAdapter implements IAdapter {
-  private worker = new Worker(
-    new URL("./sqlite-wasm.worker.mjs", import.meta.url)
-    // { type: "module" }
+  private worker = new RWorker(
+    new URL("./sqlite-wasm.worker.mjs", import.meta.url),
+    isNode ? {} : { type: "module" }
   );
 
   connect: (path: string) => Promise<void> = async (path: string) => {};
