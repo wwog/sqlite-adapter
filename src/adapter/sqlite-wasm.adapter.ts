@@ -1,15 +1,14 @@
 /* npm:@sqlite.org/sqlite-wasm */
 import type { ISqlitePrepare, IAdapter } from "./base";
+import { Worker } from "worker_threads";
 
 export class SqliteWasmAdapter implements IAdapter {
   private worker = new Worker(
-    new URL("./sqlite-wasm.worker.mjs", import.meta.url),
-    { type: "module" }
+    new URL("./sqlite-wasm.worker.mjs", import.meta.url)
+    // { type: "module" }
   );
 
-  connect: (path: string) => Promise<void> = async (path: string) => {
-    
-  };
+  connect: (path: string) => Promise<void> = async (path: string) => {};
   disconnect: () => Promise<void> = async () => {
     throw new Error("Method not implemented.");
   };
