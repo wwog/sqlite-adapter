@@ -16,10 +16,28 @@ export class SqliteNodeAdapter implements IAdapter {
     if (this.db) {
       throw new Error("Already connected to a database.");
     }
-    this.db = new Database(path);
+    return new Promise((res, rej) => {
+      this.db = new sqlite3.Database(path, (err) => {
+        if (err) {
+          return rej(err);
+        }
+        res();
+      });
+    });
   };
   disconnect: () => Promise<void> = async () => {
-    throw new Error("Method not implemented.");
+    return new Promise((res, rej) => {
+      if (!this.db) {
+        return res();
+      }
+      this.db.close((err) => {
+        if (err) {
+          return rej(err);
+        }
+        this.db = null;
+        res();
+      });
+    });
   };
   execute: <T>(sql: string, params?: any[]) => Promise<T> = async (
     sql: string,
