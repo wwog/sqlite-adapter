@@ -6,125 +6,236 @@ import {
 } from "./base";
 import { Worker as NodeWorker } from "worker_threads";
 import type { JsonRpcRequest, JsonRpcResponse } from "./rpc";
-const isNode = typeof window === "undefined";
 
+const isNode = typeof window === "undefined";
 const RWorker = isNode ? NodeWorker : Worker;
 
-class SqliteWasmPrepare implements ISqlitePrepare {
-  private sql: string;
+// 请求状态管理接口
+interface PendingRequest {
+  resolve: (response: any) => void;
+  reject: (error: any) => void;
+  timer: NodeJS.Timeout;
+}
 
-  constructor(adapter: SqliteWasmAdapter, sql: string) {
-    this.sql = sql;
-  }
-  run: (params?: any[]) => Promise<any>;
-  get: (params?: any[]) => Promise<any>;
-  all: (params?: any[]) => Promise<any[]>;
+// 预处理语句实现
+class SqliteWasmPrepare implements ISqlitePrepare {
+  constructor(private adapter: SqliteWasmAdapter, private sql: string) {}
+
+  run = async (params?: any[]): Promise<any> => {
+    throw new Error("Method not implemented.");
+  };
+
+  get = async (params?: any[]): Promise<any> => {
+    throw new Error("Method not implemented.");
+  };
+
+  all = async (params?: any[]): Promise<any[]> => {
+    throw new Error("Method not implemented.");
+  };
 }
 
 export interface SqliteWasmOptions {
-  timeout?: number; // Timeout for requests in milliseconds
+  timeout?: number; // 请求超时时间（毫秒）
+  workerUrl?: string; // Worker脚本URL
 }
 
 export class SqliteWasmAdapter implements IAdapter {
   private worker: Worker;
-  private counter = 0;
-  private prefix = Math.random().toString(16).substring(2, 6) + "-";
-  private getNextId() {
-    if (this.counter >= Number.MAX_SAFE_INTEGER) {
-      this.counter = 0;
-    }
-    return this.prefix + this.counter++;
-  }
-  private requests: Map<
-    string,
-    {
-      resolve: (response: any) => void;
-      reject: (error: any) => void;
-    }
-  > = new Map();
-  private preparedStatements: Map<string, SqliteWasmPrepare> = new Map();
+  private requestCounter = 0;
+  private readonly requestPrefix: string;
+  private pendingRequests = new Map<string, PendingRequest>();
+  private timedOutRequests = new Set<string>();
+  private preparedStatements = new Map<string, SqliteWasmPrepare>();
+  private isDisposed = false;
 
-  constructor(private options: SqliteWasmOptions = { timeout: 10_000 }) {
-    this.worker = new RWorker(
-      new URL("./sqlite-wasm.worker.mjs", import.meta.url),
-      isNode ? {} : { type: "module" }
-    ) as Worker;
-    this.worker.addEventListener("message", this.handleMessage);
-    this.worker.addEventListener("error", (error) => {
-      console.error("Worker error:", error);
-      //当worker发生错误时，清理所有请求，避免内存泄漏
-      this.requests.forEach(({ reject }) =>
-        reject({
-          code: SqliteAdapterErrorCode.WORKER_ERROR,
-          message: "Worker error",
-        })
-      );
-      this.requests.clear();
-    });
+  constructor(private options: SqliteWasmOptions = {}) {
+    this.options = {
+      timeout: 10_000,
+      ...options,
+    };
+
+    // 生成唯一的请求前缀，避免不同实例间的ID冲突
+    this.requestPrefix = Math.random().toString(16).substring(2, 6) + "-";
+
+    this.initializeWorker();
   }
 
-  private handleMessage = (event: MessageEvent<JsonRpcResponse<any>>) => {
+  /**
+   * 初始化Web Worker
+   */
+  private initializeWorker(): void {
+    this.worker = this.options.workerUrl
+      ? (new RWorker(
+          new URL(this.options.workerUrl!, import.meta.url),
+          isNode ? {} : { type: "module" }
+        ) as Worker)
+      : //不清楚如果不显示传递url路径会不会影响上层打包，这里不给workerUrl默认值而是显式传递
+        (new RWorker(
+          new URL("./sqlite-wasm.worker.mjs", import.meta.url),
+          isNode ? {} : { type: "module" }
+        ) as Worker);
+
+    this.worker.addEventListener("message", this.handleWorkerMessage);
+    this.worker.addEventListener("error", this.handleWorkerError);
+  }
+
+  /**
+   * 生成唯一的请求ID
+   */
+  private generateRequestId(): string {
+    if (this.requestCounter >= Number.MAX_SAFE_INTEGER) {
+      this.requestCounter = 0;
+    }
+    return this.requestPrefix + this.requestCounter++;
+  }
+
+  /**
+   * 处理Worker消息
+   */
+  private handleWorkerMessage = (
+    event: MessageEvent<JsonRpcResponse<any>>
+  ): void => {
     const response = event.data;
-    if (response.id === null) {
-      return; // Ignore notifications without an ID
+
+    // 忽略没有ID的通知消息
+    if (response.id === null || response.id === undefined) {
+      return;
     }
+
     if (typeof response.id === "number") {
-      throw new Error(`Unexpected response ID type: ${typeof response.id}`);
+      console.error(`意外的响应ID类型: ${typeof response.id}`);
+      return;
     }
-    const resolver = this.requests.get(response.id);
-    if (resolver) {
+
+    // 处理超时请求的延迟响应
+    if (this.timedOutRequests.has(response.id)) {
+      this.timedOutRequests.delete(response.id);
+      return;
+    }
+
+    // 处理正常请求响应
+    const pendingRequest = this.pendingRequests.get(response.id);
+    if (pendingRequest) {
+      clearTimeout(pendingRequest.timer);
+      this.pendingRequests.delete(response.id);
+
       if (response.error) {
-        resolver.reject(response.error);
+        pendingRequest.reject(response.error);
       } else {
-        resolver.resolve(response.result);
+        pendingRequest.resolve(response.result);
       }
-      // Remove the request from the map after resolving or rejecting
-      this.requests.delete(response.id);
     } else {
-      console.warn(`Unhandled response: ${JSON.stringify(response)}`);
+      console.warn(`收到未处理的响应: ${JSON.stringify(response)}`);
     }
   };
 
-  private async request<T>(method: string, params: any[] = []): Promise<T> {
+  /**
+   * 处理Worker错误
+   */
+  private handleWorkerError = (error: ErrorEvent): void => {
+    console.error("Worker错误:", error);
+    this.dispose("Worker发生错误");
+  };
+
+  /**
+   * 发送请求到Worker
+   */
+  private async sendRequest<T>(method: string, params: any[] = []): Promise<T> {
+    if (this.isDisposed) {
+      throw new Error("适配器已被释放");
+    }
+
     return new Promise<T>((resolve, reject) => {
-      const id = this.getNextId();
+      const id = this.generateRequestId();
+
+      // 设置超时处理
+      const timer = setTimeout(() => {
+        this.timedOutRequests.add(id);
+        this.pendingRequests.delete(id);
+        reject({
+          code: SqliteAdapterErrorCode.TIMEOUT,
+          message: `请求超时 (${this.options.timeout}ms)`,
+        });
+      }, this.options.timeout);
+
+      // 保存请求信息
+      this.pendingRequests.set(id, {
+        resolve: (result: T) => {
+          clearTimeout(timer);
+          resolve(result);
+        },
+        reject: (error: any) => {
+          clearTimeout(timer);
+          reject(error);
+        },
+        timer,
+      });
+
+      // 发送消息到Worker
       const message: JsonRpcRequest<any[]> = {
         jsonrpc: "2.0",
         id,
         method,
         params,
       };
+
       this.worker.postMessage(message);
-      setTimeout(() => {
-        reject({
-          code: SqliteAdapterErrorCode.TIMEOUT,
-          message: "Request timed out",
-        });
-        this.requests.delete(id);
-      }, this.options.timeout);
-      this.requests.set(id, { resolve, reject });
     });
   }
 
-  connect: (path: string) => Promise<void> = async (path: string) => {
-    return await this.request<void>("connect", [path]);
+  /**
+   * 释放所有资源
+   */
+  private dispose(reason = "适配器被释放"): void {
+    if (this.isDisposed) return;
+
+    this.isDisposed = true;
+
+    // 拒绝所有待处理的请求
+    this.pendingRequests.forEach(({ reject, timer }) => {
+      clearTimeout(timer);
+      reject({
+        code: SqliteAdapterErrorCode.WORKER_ERROR,
+        message: reason,
+      });
+    });
+
+    // 清理所有状态
+    this.pendingRequests.clear();
+    this.timedOutRequests.clear();
+    this.preparedStatements.clear();
+  }
+
+  // 公共API方法
+  connect = async (path: string): Promise<void> => {
+    return this.sendRequest<void>("connect", [path]);
   };
 
-  disconnect: () => Promise<void> = async () => {
-    return await this.request<void>("disconnect");
+  disconnect = async (): Promise<void> => {
+    this.dispose("连接已断开");
+    if (!this.isDisposed) {
+      await this.sendRequest<void>("disconnect");
+    }
+
+    // 终止Worker
+    this.worker?.terminate?.();
   };
 
   execute = async <T>(sql: string, params?: any[]): Promise<T> => {
-    return await this.request<T>("execute", [sql, params]);
+    return this.sendRequest<T>("execute", [sql, params]);
   };
 
-  prepare: (sql: string) => Promise<ISqlitePrepare> = async (sql: string) => {
+  prepare = async (sql: string): Promise<ISqlitePrepare> => {
+    // 复用已存在的预处理语句
     if (this.preparedStatements.has(sql)) {
       return this.preparedStatements.get(sql)!;
     }
-    await this.request<void>("prepare", [sql]);
-    const stmt = new SqliteWasmPrepare(this, sql);
-    this.preparedStatements.set(sql, stmt);
-    return stmt;
+
+    // 准备新的语句
+    await this.sendRequest<void>("prepare", [sql]);
+    const statement = new SqliteWasmPrepare(this, sql);
+    this.preparedStatements.set(sql, statement);
+
+    return statement;
   };
 }
