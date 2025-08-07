@@ -14,4 +14,5 @@ export interface IAdapter {
 export enum SqliteAdapterErrorCode {
   TIMEOUT = -1,
   WORKER_ERROR = -2,
+  RPC_INVALID_REQUEST = -32600,
 }

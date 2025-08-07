@@ -4,11 +4,7 @@ import {
   type IAdapter,
   SqliteAdapterErrorCode,
 } from "./base";
-import { Worker as NodeWorker } from "worker_threads";
 import type { JsonRpcRequest, JsonRpcResponse } from "./rpc";
-
-const isNode = typeof window === "undefined";
-const RWorker = isNode ? NodeWorker : Worker;
 
 // 请求状态管理接口
 interface PendingRequest {
@@ -19,7 +15,10 @@ interface PendingRequest {
 
 // 预处理语句实现
 class SqliteWasmPrepare implements ISqlitePrepare {
-  constructor(private adapter: SqliteWasmAdapter, private sql: string) {}
+  public sql: string;
+  constructor(private adapter: SqliteWasmAdapter, sql: string) {
+    this.sql = sql;
+  }
 
   run = async (params?: any[]): Promise<any> => {
     throw new Error("Method not implemented.");
@@ -40,7 +39,7 @@ export interface SqliteWasmOptions {
 }
 
 export class SqliteWasmAdapter implements IAdapter {
-  private worker: Worker;
+  private worker!: Worker;
   private requestCounter = 0;
   private readonly requestPrefix: string;
   private pendingRequests = new Map<string, PendingRequest>();
@@ -65,15 +64,13 @@ export class SqliteWasmAdapter implements IAdapter {
    */
   private initializeWorker(): void {
     this.worker = this.options.workerUrl
-      ? (new RWorker(
-          new URL(this.options.workerUrl!, import.meta.url),
-          isNode ? {} : { type: "module" }
-        ) as Worker)
+      ? new Worker(new URL(this.options.workerUrl!, import.meta.url), {
+          type: "module",
+        })
       : //不清楚如果不显示传递url路径会不会影响上层打包，这里不给workerUrl默认值而是显式传递
-        (new RWorker(
-          new URL("./sqlite-wasm.worker.mjs", import.meta.url),
-          isNode ? {} : { type: "module" }
-        ) as Worker);
+        new Worker(new URL("./sqlite-wasm.worker.mjs", import.meta.url), {
+          type: "module",
+        });
 
     this.worker.addEventListener("message", this.handleWorkerMessage);
     this.worker.addEventListener("error", this.handleWorkerError);
