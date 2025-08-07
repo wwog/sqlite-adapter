@@ -2,7 +2,6 @@ export interface ISqlitePrepare {
   run: (params?: any[]) => Promise<any>;
   get: (params?: any[]) => Promise<any>;
   all: (params?: any[]) => Promise<any[]>;
-  finalize: () => Promise<void>;
 }
 
 export interface IAdapter {
