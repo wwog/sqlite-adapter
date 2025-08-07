@@ -1,5 +1,9 @@
 /* npm:@sqlite.org/sqlite-wasm */
-import type { ISqlitePrepare, IAdapter } from "./base";
+import {
+  type ISqlitePrepare,
+  type IAdapter,
+  SqliteAdapterErrorCode,
+} from "./base";
 import { Worker as NodeWorker } from "worker_threads";
 import type { JsonRpcRequest, JsonRpcResponse } from "./rpc";
 const isNode = typeof window === "undefined";
@@ -15,6 +19,10 @@ class SqliteWasmPrepare implements ISqlitePrepare {
   run: (params?: any[]) => Promise<any>;
   get: (params?: any[]) => Promise<any>;
   all: (params?: any[]) => Promise<any[]>;
+}
+
+export interface SqliteWasmOptions {
+  timeout?: number; // Timeout for requests in milliseconds
 }
 
 export class SqliteWasmAdapter implements IAdapter {
@@ -36,7 +44,7 @@ export class SqliteWasmAdapter implements IAdapter {
   > = new Map();
   private preparedStatements: Map<string, SqliteWasmPrepare> = new Map();
 
-  constructor() {
+  constructor(private options: SqliteWasmOptions = { timeout: 10_000 }) {
     this.worker = new RWorker(
       new URL("./sqlite-wasm.worker.mjs", import.meta.url),
       isNode ? {} : { type: "module" }
@@ -46,7 +54,10 @@ export class SqliteWasmAdapter implements IAdapter {
       console.error("Worker error:", error);
       //当worker发生错误时，清理所有请求，避免内存泄漏
       this.requests.forEach(({ reject }) =>
-        reject({ code: -1, message: "Worker error" })
+        reject({
+          code: SqliteAdapterErrorCode.WORKER_ERROR,
+          message: "Worker error",
+        })
       );
       this.requests.clear();
     });
@@ -84,6 +95,13 @@ export class SqliteWasmAdapter implements IAdapter {
         params,
       };
       this.worker.postMessage(message);
+      setTimeout(() => {
+        reject({
+          code: SqliteAdapterErrorCode.TIMEOUT,
+          message: "Request timed out",
+        });
+        this.requests.delete(id);
+      }, this.options.timeout);
       this.requests.set(id, { resolve, reject });
     });
   }

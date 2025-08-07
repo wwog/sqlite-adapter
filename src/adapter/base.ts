@@ -10,3 +10,8 @@ export interface IAdapter {
   execute: <T>(sql: string, params?: any[]) => Promise<T>;
   prepare: (sql: string) => Promise<ISqlitePrepare>;
 }
+
+export enum SqliteAdapterErrorCode {
+  TIMEOUT = -1,
+  WORKER_ERROR = -2,
+}
