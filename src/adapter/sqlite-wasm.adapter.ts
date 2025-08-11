@@ -212,12 +212,7 @@ export class SqliteWasmAdapter implements IAdapter {
 
   disconnect = async (): Promise<void> => {
     this.dispose("连接已断开");
-    if (!this.isDisposed) {
-      await this._call<void>("disconnect");
-    }
-
-    // 终止Worker
-    this.worker?.terminate?.();
+    await this._call<void>("disconnect");
   };
 
   execute = async <T>(sql: string, params?: any[]): Promise<T> => {

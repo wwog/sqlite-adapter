@@ -57,7 +57,6 @@ class SqliteWorkerHandler {
     this.db = null;
     /** @type {Map<string, import ("@sqlite.org/sqlite-wasm").PreparedStatement>} SQL -> 句柄 */
     this.sqlToStmtMap = new Map();
-    this.stmtCounter = 1;
   }
 
   connect = async (path) => {
@@ -172,7 +171,7 @@ class SqliteWorkerHandler {
     return rows;
   };
 
-  finalize = async (sql) => {
+  prepare_finalize = async (sql) => {
     const stmt = this.sqlToStmtMap.get(sql);
     if (stmt) {
       stmt.finalize?.();
@@ -207,17 +206,17 @@ self.addEventListener("message", async (event) => {
       case "prepare":
         result = await handler.prepare(params[0]);
         break;
-      case "run":
-        result = await handler.run(params[0], params[1]);
+      case "prepare_run":
+        result = await handler.prepare_run(params[0], params[1]);
         break;
-      case "get":
-        result = await handler.get(params[0], params[1]);
+      case "prepare_get":
+        result = await handler.prepare_get(params[0], params[1]);
         break;
-      case "all":
-        result = await handler.all(params[0], params[1]);
+      case "prepare_all":
+        result = await handler.prepare_all(params[0], params[1]);
         break;
-      case "finalize":
-        result = await handler.finalize(params[0]);
+      case "prepare_finalize":
+        result = await handler.prepare_finalize(params[0]);
         break;
       default:
         postErrorResponse(
