@@ -7,7 +7,6 @@ const isDev = process.env.NODE_ENV !== "production";
 
 const sqlite3 = isDev ? _sqlite3.verbose() : _sqlite3;
 
-
 class SqliteNodePrepare implements ISqlitePrepare {
   public sql: string;
   private stmt: _sqlite3.Statement;
@@ -24,7 +23,7 @@ class SqliteNodePrepare implements ISqlitePrepare {
         }
         res([]);
       });
-    })
+    });
   };
 
   get = async (params?: any[]): Promise<any> => {
@@ -35,7 +34,7 @@ class SqliteNodePrepare implements ISqlitePrepare {
         }
         res(rows);
       });
-    })
+    });
   };
 
   all = async (params?: any[]): Promise<any[]> => {
@@ -46,14 +45,14 @@ class SqliteNodePrepare implements ISqlitePrepare {
         }
         res(rows);
       });
-    })
+    });
   };
 }
 
 export class SqliteNodeAdapter implements IAdapter {
   private db: Database | null = null;
 
-  private prepareStatement: Map<string, SqliteNodePrepare>
+  private prepareStatement: Map<string, SqliteNodePrepare>;
 
   constructor() {
     this.prepareStatement = new Map();
@@ -73,6 +72,7 @@ export class SqliteNodeAdapter implements IAdapter {
     });
   };
   disconnect: () => Promise<void> = async () => {
+    this.prepareStatement.clear();
     return new Promise((res, rej) => {
       if (!this.db) {
         return res();
@@ -132,6 +132,7 @@ export class SqliteNodeAdapter implements IAdapter {
     return result as T;
   };
   prepare: (sql: string) => Promise<ISqlitePrepare> = async (sql: string) => {
+    if (!this.db) throw new Error("Not connected to a database.");
     if (this.prepareStatement.get(sql)) {
       return this.prepareStatement.get(sql)!;
     }
