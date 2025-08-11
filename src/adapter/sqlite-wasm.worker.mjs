@@ -7,22 +7,10 @@ let modulePromise = sqlite3InitModule({
   printErr: console.error,
 });
 
-const ERR_TASK_EXPIRED = -32001;
-
-const highQueue = new Array(); // priority=1
-const normalQueue = new Array(); // priority=0 或未设置
-const lowQueue = new Array(); // priority=-1
-
-function normalizePriority(p) {
-  if (p > 0) return 1;
-  if (p < 0) return -1;
-  return 0;
-}
-
-/* 
-  /u_123/common.sqlite => {dirName: "u_123", filename: "common"}
-  /common.sqlite => {dirName: "def", filename: "common"}
-  /tmm/u_63/dev/common.sqlite => {dirName: "tmm_u_63_dev", filename: "common"}
+/** 
+  -  /u_123/common.sqlite => {dirName: "u_123", filename: "common"} 
+  - /common.sqlite => {dirName: "def", filename: "common"} 
+  - /tmm/u_63/dev/common.sqlite => {dirName: "tmm_u_63_dev", filename: "common"}
 */
 function normalizePath(path) {
   const segments = path.split("/").filter(Boolean);
@@ -58,82 +46,6 @@ function postResultResponse(id, result) {
   self.postMessage(response);
 }
 
-function pickNextTask() {
-  // 高优先 → 普通 → 低优先
-  return highQueue.shift() || normalQueue.shift() || lowQueue.shift();
-}
-
-let processing = false;
-/**
- * 处理任务队列
- * @param {SqliteWorkerHandler} handler
- * @returns
- */
-async function processQueue(handler) {
-  if (processing) return;
-  processing = true;
-  try {
-    while (
-      highQueue.length > 0 ||
-      normalQueue.length > 0 ||
-      lowQueue.length > 0
-    ) {
-      const task = pickNextTask();
-      if (!task) break;
-
-      const { id, method, params, rpc, enqueuedAt } = task;
-      const now = Date.now();
-      const ttl = rpc?.ttl;
-      if (typeof ttl === "number" && ttl >= 0) {
-        if (now - enqueuedAt > ttl) {
-          // 过期，返回错误
-          postErrorResponse(
-            id,
-            ERR_TASK_EXPIRED,
-            `Task expired in queue (ttl=${ttl}ms)`,
-            {
-              method,
-            }
-          );
-          continue;
-        }
-      }
-
-      try {
-        let result;
-        const [p1, p2] = Array.isArray(params) ? params : [];
-        switch (method) {
-          case "connect":
-            result = await handler.connect(p1);
-            break;
-          case "disconnect":
-            result = await handler.disconnect();
-            break;
-          case "execute":
-            result = await handler.execute(p1, p2);
-            break;
-          case "prepare":
-            result = await handler.prepare(p1);
-            break;
-          default:
-            postErrorResponse(id, -32601, `Method not found: ${method}`);
-            continue;
-        }
-        postResultResponse(id, result);
-      } catch (error) {
-        postErrorResponse(
-          id,
-          error?.code ?? -32603,
-          error?.message ?? "Internal error",
-          error
-        );
-      }
-    }
-  } finally {
-    processing = false;
-  }
-}
-
 class SqliteWorkerHandler {
   connected = false;
   constructor() {
@@ -143,6 +55,9 @@ class SqliteWorkerHandler {
     this.poolUtil = null;
     /** @type {import ('@sqlite.org/sqlite-wasm').OpfsSAHPoolDatabase | null} */
     this.db = null;
+    /** @type {Map<string, import ("@sqlite.org/sqlite-wasm").PreparedStatement>} SQL -> 句柄 */
+    this.sqlToStmtMap = new Map();
+    this.stmtCounter = 1;
   }
 
   connect = async (path) => {
@@ -159,6 +74,9 @@ class SqliteWorkerHandler {
     });
     const { OpfsSAHPoolDb } = this.poolUtil;
     this.db = new OpfsSAHPoolDb(filename);
+    this.db.exec("pragma locking_mode=exclusive");
+    this.db.exec("PRAGMA journal_mode=WAL");
+
     if (this.db && this.db.isOpen && this.db.isOpen()) {
       this.connected = true;
     } else {
@@ -169,12 +87,23 @@ class SqliteWorkerHandler {
     if (!this.connected) return;
     try {
       if (this.db && typeof this.db.close === "function") {
+        this.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+        const fileNames = this.poolUtil.getFileNames();
+        console.log("disconnect fileNames", fileNames);
         this.db.close();
       }
     } finally {
       this.db = null;
       this.poolUtil = null;
       this.sqlite3 = null;
+      // 清理所有未释放的 statement
+      try {
+        for (const [sql, stmt] of this.sqlToStmtMap.entries()) {
+          stmt.finalize();
+        }
+      } finally {
+        this.sqlToStmtMap.clear();
+      }
       this.connected = false;
       console.log("Disconnected from SQLite database");
     }
@@ -185,63 +114,71 @@ class SqliteWorkerHandler {
     }
     const db = this.db;
     if (!db) throw new Error("DB not available");
-
-    const trimmed = (sql || "").trim();
-    const isSelect = /^select\b/i.test(trimmed);
-
-    // 使用 prepare 以支持参数绑定
-    const stmt = db.prepare(sql);
-    try {
-      if (params && Array.isArray(params) && params.length) {
-        stmt.bind(params);
-      }
-
-      if (isSelect) {
-        const rows = [];
-        while (stmt.step()) {
-          // 以对象形式返回，列名为键
-          rows.push(stmt.getAsObject());
-        }
-        return rows;
-      } else {
-        // 非查询：执行一次，随后返回影响行数与 last_insert_rowid
-        // 对于非查询，step 一次以执行语句
-        stmt.step();
-        // 获取 changes 与 last_insert_rowid
-        const meta = db.prepare(
-          "SELECT changes() AS changes, last_insert_rowid() AS lastID"
-        );
-        try {
-          let changes = 0;
-          let lastID = 0;
-          if (meta.step()) {
-            const row = meta.getAsObject();
-            changes = Number(row.changes) || 0;
-            lastID = Number(row.lastID) || 0;
-          }
-          return { changes, lastID };
-        } finally {
-          meta.finalize?.();
-        }
-      }
-    } finally {
-      stmt.finalize?.();
+    const options = {
+      rowMode: "object",
+    };
+    if (params && Array.isArray(params) && params.length) {
+      options.bind = params;
     }
+
+    const result = this.db.exec(sql, options);
+    return result;
   };
   prepare = async (sql) => {
     if (!this.connected) {
       throw new Error("Not connected to SQLite database");
     }
-    // 先按需实现但不暴露 statement 句柄（当前适配器侧未使用）
-    // 这里仅做语法校验，若 prepare 失败会抛错
+    const existing = this.sqlToStmtMap.get(sql);
+    if (existing) return existing;
     const db = this.db;
     const stmt = db.prepare(sql);
-    try {
-      // 立即 finalize，当前不保存句柄
-      return true;
-    } finally {
-      stmt.finalize?.();
+    this.sqlToStmtMap.set(sql, stmt);
+    return sql;
+  };
+
+  prepare_run = async (sql, params) => {
+    const stmt = this.sqlToStmtMap.get(sql);
+    if (!stmt) throw new Error(`Invalid statement sql: ${sql}`);
+    if (params && Array.isArray(params) && params.length) {
+      stmt.bind(params);
     }
+    stmt.step();
+    stmt.reset(true);
+    return true;
+  };
+
+  prepare_get = async (sql, params) => {
+    const stmt = this.sqlToStmtMap.get(sql);
+    if (!stmt) throw new Error(`Invalid statement sql: ${sql}`);
+    if (params && Array.isArray(params) && params.length) {
+      stmt.bind(params);
+    }
+    const row = stmt.step() ? stmt.getJSON() : null;
+    stmt.reset(true);
+    return row;
+  };
+
+  prepare_all = async (sql, params) => {
+    const stmt = this.sqlToStmtMap.get(sql);
+    if (!stmt) throw new Error(`Invalid statement sql: ${sql}`);
+    if (params && Array.isArray(params) && params.length) {
+      stmt.bind(params);
+    }
+    const rows = [];
+    while (stmt.step()) {
+      rows.push(stmt.getAsObject());
+    }
+    stmt.reset(true);
+    return rows;
+  };
+
+  finalize = async (sql) => {
+    const stmt = this.sqlToStmtMap.get(sql);
+    if (stmt) {
+      stmt.finalize?.();
+      this.sqlToStmtMap.delete(sql);
+    }
+    return true;
   };
 }
 
@@ -254,20 +191,51 @@ self.addEventListener("message", async (event) => {
     postErrorResponse(request?.id ?? null, -32600, "Invalid Request", request);
     return;
   }
-
-  const rpc = request.rpc || {}; // 兼容性处理：如果适配器未传，使用空对象
-  const task = {
-    id: request.id,
-    method: request.method,
-    params: Array.isArray(request.params) ? request.params : [],
-    rpc,
-    enqueuedAt: Date.now(),
-  };
-  const pri = normalizePriority(rpc.priority ?? 0);
-  if (pri === 1) highQueue.push(task);
-  else if (pri === -1) lowQueue.push(task);
-  else normalQueue.push(task);
-  processQueue(handler);
+  const params = Array.isArray(request.params) ? request.params : [];
+  try {
+    let result;
+    switch (request.method) {
+      case "connect":
+        result = await handler.connect(params[0]);
+        break;
+      case "disconnect":
+        result = await handler.disconnect();
+        break;
+      case "execute":
+        result = await handler.execute(params[0], params[1]);
+        break;
+      case "prepare":
+        result = await handler.prepare(params[0]);
+        break;
+      case "run":
+        result = await handler.run(params[0], params[1]);
+        break;
+      case "get":
+        result = await handler.get(params[0], params[1]);
+        break;
+      case "all":
+        result = await handler.all(params[0], params[1]);
+        break;
+      case "finalize":
+        result = await handler.finalize(params[0]);
+        break;
+      default:
+        postErrorResponse(
+          request.id ?? null,
+          -32601,
+          `Method not found: ${request.method}`
+        );
+        return;
+    }
+    postResultResponse(request.id, result);
+  } catch (error) {
+    postErrorResponse(
+      request.id ?? null,
+      error?.code ?? -32603,
+      error?.message ?? "Internal error",
+      error
+    );
+  }
 });
 
 // 错误处理

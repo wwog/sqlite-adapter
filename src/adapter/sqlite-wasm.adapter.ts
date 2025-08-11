@@ -4,7 +4,7 @@ import {
   type IAdapter,
   SqliteAdapterErrorCode,
 } from "./base";
-import type { JsonRpcRequest, JsonRpcResponse, RpcOpts } from "./rpc";
+import type { JsonRpcRequest, JsonRpcResponse } from "./rpc";
 
 // 请求状态管理接口
 interface PendingRequest {
@@ -21,15 +21,15 @@ class SqliteWasmPrepare implements ISqlitePrepare {
   }
 
   run = async (params?: any[]): Promise<any> => {
-    throw new Error("Method not implemented.");
+    return this.adapter._call("prepare_run", [this.sql, params ?? []]);
   };
 
   get = async (params?: any[]): Promise<any> => {
-    throw new Error("Method not implemented.");
+    return this.adapter._call("prepare_get", [this.sql, params ?? []]);
   };
 
   all = async (params?: any[]): Promise<any[]> => {
-    throw new Error("Method not implemented.");
+    return this.adapter._call("prepare_all", [this.sql, params ?? []]);
   };
 }
 
@@ -46,10 +46,12 @@ export class SqliteWasmAdapter implements IAdapter {
   private timedOutRequests = new Set<string>();
   private preparedStatements = new Map<string, SqliteWasmPrepare>();
   private isDisposed = false;
+  private options: Required<SqliteWasmOptions>;
 
-  constructor(private options: SqliteWasmOptions = {}) {
+  constructor(options: SqliteWasmOptions = {}) {
     this.options = {
-      timeout: 10_000,
+      timeout: 60_000,
+      workerUrl: "",
       ...options,
     };
 
@@ -63,14 +65,15 @@ export class SqliteWasmAdapter implements IAdapter {
    * 初始化Web Worker
    */
   private initializeWorker(): void {
-    this.worker = this.options.workerUrl
-      ? new Worker(new URL(this.options.workerUrl!, import.meta.url), {
-          type: "module",
-        })
-      : //不清楚如果不显示传递url路径会不会影响上层打包，这里不给workerUrl默认值而是显式传递
-        new Worker(new URL("./sqlite-wasm.worker.mjs", import.meta.url), {
-          type: "module",
-        });
+    this.worker =
+      this.options.workerUrl !== ""
+        ? new Worker(new URL(this.options.workerUrl!, import.meta.url), {
+            type: "module",
+          })
+        : //不清楚如果不显示传递url路径会不会影响上层打包，这里不给workerUrl默认值而是显式传递
+          new Worker(new URL("./sqlite-wasm.worker.mjs", import.meta.url), {
+            type: "module",
+          });
 
     this.worker.addEventListener("message", this.handleWorkerMessage);
     this.worker.addEventListener("error", this.handleWorkerError);
@@ -137,11 +140,7 @@ export class SqliteWasmAdapter implements IAdapter {
   /**
    * 发送请求到Worker
    */
-  private async _call<T>(
-    method: string,
-    params: any[] = [],
-    rpcOpts?: RpcOpts
-  ): Promise<T> {
+  public async _call<T>(method: string, params: any[] = []): Promise<T> {
     if (this.isDisposed) {
       throw new Error("适配器已被释放");
     }
@@ -149,16 +148,14 @@ export class SqliteWasmAdapter implements IAdapter {
     return new Promise<T>((resolve, reject) => {
       const id = this.generateRequestId();
 
-      // 设置超时处理
-      const timeout = rpcOpts?.timeout ?? this.options.timeout;
       const timer = setTimeout(() => {
         this.timedOutRequests.add(id);
         this.pendingRequests.delete(id);
         reject({
           code: SqliteAdapterErrorCode.TIMEOUT,
-          message: `请求超时 (${timeout}ms)`,
+          message: `请求超时 (${this.options.timeout}ms)`,
         });
-      }, timeout);
+      }, this.options.timeout);
 
       // 保存请求信息
       this.pendingRequests.set(id, {
@@ -179,7 +176,6 @@ export class SqliteWasmAdapter implements IAdapter {
         id,
         method,
         params,
-        rpc: rpcOpts ?? {},
       };
 
       this.worker.postMessage(message);
@@ -224,27 +220,16 @@ export class SqliteWasmAdapter implements IAdapter {
     this.worker?.terminate?.();
   };
 
-  // 重载：支持可选的 RpcOpts 作为第 3 参数
-  execute<T>(sql: string, params?: any[]): Promise<T>;
-  execute<T>(
-    sql: string,
-    params: any[] | undefined,
-    rpcOpts?: RpcOpts
-  ): Promise<T>;
-  async execute<T>(sql: string, params?: any[]): Promise<T> {
-    // 读取第 3 个可选参数（仅在调用方提供时存在）
-    const rpcOpts = arguments[2] as RpcOpts | undefined;
-    return this._call<T>("execute", [sql, params], rpcOpts);
-  }
+  execute = async <T>(sql: string, params?: any[]): Promise<T> => {
+    return this._call<T>("execute", [sql, params]);
+  };
 
   prepare = async (sql: string): Promise<ISqlitePrepare> => {
-    // 复用已存在的预处理语句
     if (this.preparedStatements.has(sql)) {
       return this.preparedStatements.get(sql)!;
     }
 
-    // 准备新的语句
-    await this._call<void>("prepare", [sql]);
+    await this._call<string>("prepare", [sql]);
     const statement = new SqliteWasmPrepare(this, sql);
     this.preparedStatements.set(sql, statement);
 
