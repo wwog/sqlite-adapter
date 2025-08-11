@@ -17,7 +17,7 @@ class SqliteNodePrepare implements ISqlitePrepare {
 
   run = async (params?: any[]): Promise<any> => {
     return new Promise((res, rej) => {
-      this.stmt.run(...(params || []), (err) => {
+      this.stmt.run(...(params || []), (err: Error | null) => {
         if (err) {
           return rej(err);
         }
@@ -28,7 +28,7 @@ class SqliteNodePrepare implements ISqlitePrepare {
 
   get = async (params?: any[]): Promise<any> => {
     return new Promise((res, rej) => {
-      this.stmt.get(...(params || []), (err, rows) => {
+      this.stmt.get(...(params || []), (err: Error | null, rows: any[]) => {
         if (err) {
           return rej(err);
         }
@@ -39,7 +39,7 @@ class SqliteNodePrepare implements ISqlitePrepare {
 
   all = async (params?: any[]): Promise<any[]> => {
     return new Promise((res, rej) => {
-      this.stmt.all(...(params || []), (err, rows) => {
+      this.stmt.all(...(params || []), (err: Error | null, rows: any[]) => {
         if (err) {
           return rej(err);
         }
