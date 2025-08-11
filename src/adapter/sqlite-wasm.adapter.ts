@@ -4,7 +4,7 @@ import {
   type IAdapter,
   SqliteAdapterErrorCode,
 } from "./base";
-import type { JsonRpcRequest, JsonRpcResponse } from "./rpc";
+import type { JsonRpcRequest, JsonRpcResponse, RpcOpts } from "./rpc";
 
 // 请求状态管理接口
 interface PendingRequest {
@@ -137,7 +137,11 @@ export class SqliteWasmAdapter implements IAdapter {
   /**
    * 发送请求到Worker
    */
-  private async sendRequest<T>(method: string, params: any[] = []): Promise<T> {
+  private async _call<T>(
+    method: string,
+    params: any[] = [],
+    rpcOpts?: RpcOpts
+  ): Promise<T> {
     if (this.isDisposed) {
       throw new Error("适配器已被释放");
     }
@@ -146,14 +150,15 @@ export class SqliteWasmAdapter implements IAdapter {
       const id = this.generateRequestId();
 
       // 设置超时处理
+      const timeout = rpcOpts?.timeout ?? this.options.timeout;
       const timer = setTimeout(() => {
         this.timedOutRequests.add(id);
         this.pendingRequests.delete(id);
         reject({
           code: SqliteAdapterErrorCode.TIMEOUT,
-          message: `请求超时 (${this.options.timeout}ms)`,
+          message: `请求超时 (${timeout}ms)`,
         });
-      }, this.options.timeout);
+      }, timeout);
 
       // 保存请求信息
       this.pendingRequests.set(id, {
@@ -174,6 +179,7 @@ export class SqliteWasmAdapter implements IAdapter {
         id,
         method,
         params,
+        rpc: rpcOpts ?? {},
       };
 
       this.worker.postMessage(message);
@@ -205,22 +211,31 @@ export class SqliteWasmAdapter implements IAdapter {
 
   // 公共API方法
   connect = async (path: string): Promise<void> => {
-    return this.sendRequest<void>("connect", [path]);
+    return this._call<void>("connect", [path]);
   };
 
   disconnect = async (): Promise<void> => {
     this.dispose("连接已断开");
     if (!this.isDisposed) {
-      await this.sendRequest<void>("disconnect");
+      await this._call<void>("disconnect");
     }
 
     // 终止Worker
     this.worker?.terminate?.();
   };
 
-  execute = async <T>(sql: string, params?: any[]): Promise<T> => {
-    return this.sendRequest<T>("execute", [sql, params]);
-  };
+  // 重载：支持可选的 RpcOpts 作为第 3 参数
+  execute<T>(sql: string, params?: any[]): Promise<T>;
+  execute<T>(
+    sql: string,
+    params: any[] | undefined,
+    rpcOpts?: RpcOpts
+  ): Promise<T>;
+  async execute<T>(sql: string, params?: any[]): Promise<T> {
+    // 读取第 3 个可选参数（仅在调用方提供时存在）
+    const rpcOpts = arguments[2] as RpcOpts | undefined;
+    return this._call<T>("execute", [sql, params], rpcOpts);
+  }
 
   prepare = async (sql: string): Promise<ISqlitePrepare> => {
     // 复用已存在的预处理语句
@@ -229,7 +244,7 @@ export class SqliteWasmAdapter implements IAdapter {
     }
 
     // 准备新的语句
-    await this.sendRequest<void>("prepare", [sql]);
+    await this._call<void>("prepare", [sql]);
     const statement = new SqliteWasmPrepare(this, sql);
     this.preparedStatements.set(sql, statement);
 
