@@ -1,5 +1,5 @@
 export interface ISqlitePrepare {
-  run: (params?: any[]) => Promise<any>;
+  run: (params?: any[]) => Promise<boolean>;
   get: (params?: any[]) => Promise<any>;
   all: (params?: any[]) => Promise<any[]>;
 }
